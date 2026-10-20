@@ -4,14 +4,23 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-20
+
+### Highlights
+- In fullscreen mode, click a message to expand or collapse just that one.
+- Sending to a session that isn't connected now says the message is waiting for it, instead of `Message sent`.
+- Queued messages are no longer lost a few seconds after the last session closes.
+- A shortened or slightly wrong session name now reaches the right session, or tells you which name you probably meant.
+- `handover` works when your selected model is a virtual model, such as a router.
+
 ### Added
 - In fullscreen mode, clicking an intercom message expands or collapses just that message. Ctrl+O still expands or collapses all of them at once. Thanks to [@summer-tt](https://github.com/summer-tt) for #178.
 
 ### Fixed
-- `handover` works when the selected model is a Pi virtual model, such as a router. Before, generating the handover failed with `Virtual model … must be routed before streaming`, because it called `complete()`, which Pi doesn't route. It now uses `streamSimple()`. Thanks to [@colinperel](https://github.com/colinperel) for #176 and #177.
-- A `send`, `reply`, or progress update to a disconnected session said `Message sent`, even though the message was only held in the broker's mailbox until that session came back. The result now says the session is not connected and the message is waiting in the broker mailbox until it reconnects. A message that reaches a session after it was replaced or shut down was dropped with no receipt. It now reports `expired`, so the sender's last known delivery state shows the drop. Thanks to [@Jaggerxtrm](https://github.com/Jaggerxtrm) for #172.
-- A slightly wrong session name failed with a misleading `Session not found`, which reads as if the session had died. This hit `send`, `ask`, and `contact_supervisor` most often with Herdr subagent names like `subagent-chat-…` that were cut short. A name that is not an exact match now resolves to the one connected session whose name starts with it, and the result says which session it resolved to. A message to the exact name of a session that is offline still waits in that session's mailbox and never goes to a different session. If several names start with it, the error lists them. Otherwise the error names the closest session name and points at `intercom list`. `status` now shows the session's own name. Thanks to [@cabi](https://github.com/cabi) for #174 and #175.
-- A message queued for a disconnected session was lost about 5 seconds after the last connected session left, because the broker exited when idle and its mailbox lives only in memory. The 24-hour mailbox retention could not be reached in that case. The broker now stays running while its mailbox holds messages, and exits once there are no sessions and the last queued message has been delivered or has expired. Thanks to [@odfalik](https://github.com/odfalik) for raising this in #173.
+- `handover` failed with `Virtual model … must be routed before streaming` when the selected model was a Pi virtual model, such as a router. It now works with virtual models. Thanks to [@colinperel](https://github.com/colinperel) for #176 and #177.
+- A `send`, `reply`, or progress update to a disconnected session said `Message sent`, even though the message was only waiting in the broker's mailbox for that session to come back. The result now says the session is not connected and the message is waiting until it reconnects. A message that arrived after its session was replaced or shut down used to vanish without a trace; the sender now gets an `expired` receipt for it. Thanks to [@Jaggerxtrm](https://github.com/Jaggerxtrm) for #172.
+- A slightly wrong session name failed with `Session not found`, which reads as if the session had died. This happened most often with Herdr subagent names like `subagent-chat-…` that were cut short. A name that isn't an exact match now goes to the one connected session whose name starts with it, and the result says which session that was. A message to the exact name of an offline session still waits in that session's mailbox and never goes to a different session. If several names match, the error lists them; if none do, it suggests the closest name and points to `intercom list`. `status` now shows the session's own name. Thanks to [@cabi](https://github.com/cabi) for #174 and #175.
+- Messages queued for a disconnected session were lost about 5 seconds after the last connected session closed, because the broker shut down when idle and its mailbox lives in memory. The broker now stays running while it holds queued messages, and shuts down once they have been delivered or have expired (after 24 hours). Thanks to [@odfalik](https://github.com/odfalik) for raising this in #173.
 
 ## [0.17.1] - 2026-10-14
 
