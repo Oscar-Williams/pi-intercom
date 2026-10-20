@@ -1657,6 +1657,204 @@ test("intercom tool prefers exact names over ID prefixes", { concurrency: false 
   }
 });
 
+
+test("intercom tool resolves a unique name prefix for send and ask", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+  const supervisor = new IntercomClient();
+  const harness = createExtensionHarness("prefix-worker");
+
+  try {
+    await supervisor.connect({ name: "subagent-chat-01a14a54-663b-722b", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "01a14a54-663b-722b-1111-supervisor");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(orchestrator, "prefix-worker");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const received = once(supervisor, "message") as Promise<[SessionInfo, Message]>;
+    const sendResult = await intercomTool.execute("send-name-prefix", { action: "send", to: "subagent-chat-01a14a54-663b", message: "truncated but unique" }, new AbortController().signal, undefined, harness.ctx);
+    assert.notEqual(sendResult.details?.error, true);
+    assert.equal(sendResult.details?.delivery, "socket_delivered");
+    assert.match(sendResult.content[0]?.text ?? "", /"subagent-chat-01a14a54-663b" resolved to "subagent-chat-01a14a54-663b-722b"/);
+    const [asker, sentMessage] = await received;
+    assert.equal(sentMessage.content.text, "truncated but unique");
+
+    const askReceived = once(supervisor, "message") as Promise<[SessionInfo, Message]>;
+    const askPromise = intercomTool.execute("ask-name-prefix", { action: "ask", to: "subagent-chat-01a14a54-663b", message: "truncated ask" }, new AbortController().signal, undefined, harness.ctx);
+    const [, askMessage] = await askReceived;
+    assert.equal(askMessage.content.text, "truncated ask");
+    await supervisor.send(asker.id, { text: "yes", replyTo: askMessage.id });
+    const askResult = await askPromise;
+    assert.notEqual(askResult.details?.error, true);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await supervisor.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("intercom tool rejects an ambiguous name prefix with both candidate ids", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const first = new IntercomClient();
+  const second = new IntercomClient();
+  const harness = createExtensionHarness("ambiguity-worker");
+
+  try {
+    await first.connect({ name: "worker-alpha", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "amb-alpha-1111-1111");
+    await second.connect({ name: "worker-beta", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "amb-beta-2222-2222");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("send-ambiguous-prefix", { action: "send", to: "worker-", message: "which one?" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /Multiple session names start with "worker-"/);
+    assert.match(result.content[0]?.text ?? "", /amb-alpha/);
+    assert.match(result.content[0]?.text ?? "", /amb-beta/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await first.disconnect().catch(() => undefined);
+    await second.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("intercom tool send to an unknown target suggests the nearest name", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const supervisor = new IntercomClient();
+  const harness = createExtensionHarness("typo-worker");
+
+  try {
+    await supervisor.connect({ name: "subagent-chat-01a14a54-663b-722b", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "01a14a54-663b-722b-2222-supervisor");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("send-typo-target", { action: "send", to: "subagent-chat-01a14a54-633b", message: "one char off" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /No connected session matches "subagent-chat-01a14a54-633b"/);
+    assert.match(result.content[0]?.text ?? "", /Nearest name: "subagent-chat-01a14a54-663b-722b" \(01a14a54\)/);
+    assert.match(result.content[0]?.text ?? "", /intercom list/);
+    assert.doesNotMatch(result.content[0]?.text ?? "", /Session not found/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await supervisor.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("intercom tool send to an unknown target without a near match points at list", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const harness = createExtensionHarness("void-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("send-void-target", { action: "send", to: "zzz-void-target", message: "nothing near" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /No connected session matches "zzz-void-target"\. Run intercom list for connected sessions\./);
+    assert.doesNotMatch(result.content[0]?.text ?? "", /Nearest/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("intercom ask to an unknown target reports the diagnostic and keeps queueing guidance", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const harness = createExtensionHarness("void-ask-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("ask-void-target", { action: "ask", to: "zzz-void-target", message: "nobody home" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /No connected session matches "zzz-void-target"/);
+    assert.match(result.content[0]?.text ?? "", /Blocking asks are not queued/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("intercom status lists the session name and short id", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { cleanup } = await setupClients();
+  const harness = createExtensionHarness("status-probe", { sessionId: "statusprobe-1111-2222-3333" });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("status-named", { action: "status" }, new AbortController().signal, undefined, harness.ctx);
+    assert.notEqual(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /Session ID: statusprobe-1111-2222-3333/);
+    assert.match(result.content[0]?.text ?? "", /Session name: status-probe \(short id: statuspr\)/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+async function withExactOfflineNameAndLongerOnlineName(run: (harness: ReturnType<typeof createExtensionHarness>, onlineMessages: Message[]) => Promise<void>): Promise<void> {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+  const offline = new IntercomClient();
+  const online = new IntercomClient();
+  const harness = createExtensionHarness("prefix-sender");
+  try {
+    // "worker" connects and then goes away: the broker keeps a mailbox for it.
+    await offline.connect({ name: "worker", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "offline-worker-1111-1111");
+    await waitForSessionByName(orchestrator, "worker");
+    await offline.disconnect();
+    const onlineMessages: Message[] = [];
+    online.on("message", (_from: SessionInfo, message: Message) => onlineMessages.push(message));
+    await online.connect({ name: "worker-2", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "online-worker2-2222-2222");
+    await waitForSessionByName(orchestrator, "worker-2");
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(orchestrator, "prefix-sender");
+    await run(harness, onlineMessages);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await offline.disconnect().catch(() => undefined);
+    await online.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+}
+
+test("send to an exact disconnected name is not hijacked by a longer connected name", { concurrency: false }, async () => {
+  await withExactOfflineNameAndLongerOnlineName(async (harness, onlineMessages) => {
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("send-exact-offline-name", { action: "send", to: "worker", message: "for the offline worker only" }, new AbortController().signal, undefined, harness.ctx);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(onlineMessages.map((m) => m.content.text), []);
+    assert.equal(result.details?.delivery, "queued");
+  });
+});
+
+test("ask to an exact disconnected name is not hijacked by a longer connected name", { concurrency: false }, async () => {
+  await withExactOfflineNameAndLongerOnlineName(async (harness, onlineMessages) => {
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1000);
+    const result = await intercomTool.execute("ask-exact-offline-name", { action: "ask", to: "worker", message: "offline worker, answer?" }, controller.signal, undefined, harness.ctx);
+    clearTimeout(timeout);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(onlineMessages.map((m) => m.content.text), []);
+    assert.equal(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /not currently connected/);
+  });
+});
+
 test("extension can pin a restart-stable intercom session id", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
@@ -3495,25 +3693,99 @@ test("child supervisor blocking requests fail fast when the supervisor is discon
       index: "0",
     }, async () => {
       const harness = createExtensionHarness();
-      piIntercomExtension(harness.pi as never);
-      await harness.emitLifecycle("session_start");
-      const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
-      const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Blocked." }, new AbortController().signal, undefined, harness.ctx);
-      assert.equal(updateResult.details?.delivered, false);
-      assert.match(updateResult.content[0]?.text ?? "", /Session not found/);
-      assert.equal(updateResult.details?.reason, "Session not found");
+      try {
+        piIntercomExtension(harness.pi as never);
+        await harness.emitLifecycle("session_start");
+        const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+        const updateResult = await supervisorTool.execute("update-1", { reason: "progress_update", message: "Blocked." }, new AbortController().signal, undefined, harness.ctx);
+        assert.equal(updateResult.details?.delivered, false);
+        assert.match(updateResult.content[0]?.text ?? "", /No connected session matches "missing-orchestrator"\. Run intercom list/);
+        assert.equal(updateResult.details?.reason, "Session not found");
 
-      const askResult = await supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
-      assert.equal(askResult.details?.error, true);
-      assert.match(askResult.content[0]?.text ?? "", /not currently connected/);
+        const askResult = await supervisorTool.execute("ask-1", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
+        assert.equal(askResult.details?.error, true);
+        assert.match(askResult.content[0]?.text ?? "", /No connected session matches "missing-orchestrator".*Blocking requests are not queued/);
 
-      const secondAskResult = await supervisorTool.execute("ask-2", { reason: "need_decision", message: "Still blocked." }, new AbortController().signal, undefined, harness.ctx);
-      assert.equal(secondAskResult.details?.error, true);
-      assert.match(secondAskResult.content[0]?.text ?? "", /not currently connected/);
-      assert.doesNotMatch(secondAskResult.content[0]?.text ?? "", /Already waiting/);
-      await harness.emitLifecycle("session_shutdown");
+        const secondAskResult = await supervisorTool.execute("ask-2", { reason: "need_decision", message: "Still blocked." }, new AbortController().signal, undefined, harness.ctx);
+        assert.equal(secondAskResult.details?.error, true);
+        assert.match(secondAskResult.content[0]?.text ?? "", /Blocking requests are not queued/);
+        assert.doesNotMatch(secondAskResult.content[0]?.text ?? "", /Already waiting/);
+      } finally {
+        await harness.emitLifecycle("session_shutdown");
+      }
     });
   } finally {
+    await cleanup();
+  }
+});
+
+test("child supervisor tool resolves a truncated unique supervisor name on the first call", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({ orchestratorTarget: "orchestr", runId: "78f659a3", agent: "worker", index: "0" }, async () => {
+      const harness = createExtensionHarness("truncated-supervisor-worker");
+      try {
+        piIntercomExtension(harness.pi as never);
+        await harness.emitLifecycle("session_start");
+        const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+
+        const askReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+        const askResultPromise = supervisorTool.execute("ask-truncated", { reason: "need_decision", message: "Which path?" }, new AbortController().signal, undefined, harness.ctx);
+        const [askFrom, askMessage] = await askReceived;
+        await orchestrator.send(askFrom.id, { text: "Take the short path.", replyTo: askMessage.id });
+        const askResult = await askResultPromise;
+        assert.notEqual(askResult.details?.error, true);
+        assert.match(askResult.content[0]?.text ?? "", /"orchestr" resolved to "orchestrator"[\s\S]*Take the short path/);
+
+        const updateResult = await supervisorTool.execute("update-truncated", { reason: "progress_update", message: "Done." }, new AbortController().signal, undefined, harness.ctx);
+        assert.equal(updateResult.details?.delivered, true);
+        assert.match(updateResult.content[0]?.text ?? "", /"orchestr" resolved to "orchestrator"/);
+      } finally {
+        await harness.emitLifecycle("session_shutdown");
+      }
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("child supervisor blocking request to an offline stable supervisor id is not captured by a longer live name", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { orchestrator, cleanup } = await setupClients();
+  const offlineSupervisor = new IntercomClient();
+  const live = new IntercomClient();
+  const liveMessages: Message[] = [];
+  live.on("message", (_from: SessionInfo, message: Message) => liveMessages.push(message));
+
+  try {
+    await offlineSupervisor.connect({ name: "subagent-chat-01a14a54-663b-722b", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "01a14a54-663b-722b-3333-supervisor");
+    await waitForSessionByName(orchestrator, "subagent-chat-01a14a54-663b-722b");
+    await offlineSupervisor.disconnect();
+    await live.connect({ name: "subagent-chat-01a14a54-663b-722b-2", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "live-extends-4444-4444");
+    await waitForSessionByName(orchestrator, "subagent-chat-01a14a54-663b-722b-2");
+    await withChildOrchestratorEnv({ orchestratorTarget: "subagent-chat-01a14a54-663b", orchestratorSessionId: "01a14a54-663b-722b-3333-supervisor", runId: "78f659a3", agent: "worker", index: "0" }, async () => {
+      const harness = createExtensionHarness("stable-id-child");
+      try {
+        piIntercomExtension(harness.pi as never);
+        await harness.emitLifecycle("session_start");
+        const supervisorTool = harness.tools.find((tool) => tool.name === "contact_supervisor")!;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 1000);
+        const result = await supervisorTool.execute("ask-offline-stable-id", { reason: "need_decision", message: "Which path?" }, controller.signal, undefined, harness.ctx);
+        clearTimeout(timeout);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.deepEqual(liveMessages.map((m) => m.content.text), []);
+        assert.equal(result.details?.error, true);
+        assert.match(result.content[0]?.text ?? "", /not currently connected/);
+      } finally {
+        await harness.emitLifecycle("session_shutdown");
+      }
+    });
+  } finally {
+    await offlineSupervisor.disconnect().catch(() => undefined);
+    await live.disconnect().catch(() => undefined);
     await cleanup();
   }
 });
@@ -5168,7 +5440,7 @@ test("an expired pending ask is not inferred; the send remains ordinary", { conc
   });
 });
 
-test("intercom ask fails fast when the target is not currently connected", { concurrency: false }, async () => {
+test("intercom ask fails fast when the target is not connected", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness("offline-ask-worker");
