@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Changed
+- On Pi 1.2.0 or newer, a message that wakes an idle session no longer adds a "New intercom message above." line to the transcript. Older Pi still shows it, because it needs that line to run other extensions' prompt additions. Thanks to [@odfalik](https://github.com/odfalik) for #182.
+
 ## [0.18.0] - 2026-10-20
 
 ### Highlights
